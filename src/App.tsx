@@ -1,10 +1,13 @@
 import { useState } from 'react';
-import { Shield, Terminal, Target } from 'lucide-react';
+import { Shield, Terminal, Target, Zap, Book } from 'lucide-react';
 import CategorySection from './components/CategorySection';
+import PayloadGenerator from './components/PayloadGenerator';
+import DocsViewer from './components/DocsViewer';
 import { toolCategories } from './data/tools';
 
 function App() {
   const [target, setTarget] = useState('');
+  const [view, setView] = useState<'commands' | 'payloads' | 'docs'>('commands');
   const [activeTab, setActiveTab] = useState<'all' | number>('all');
 
   return (
@@ -19,7 +22,38 @@ function App() {
                 <p className="text-sm text-gray-400">Security Testing Command Reference</p>
               </div>
             </div>
-            <Terminal className="w-8 h-8 text-cyan-400" />
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => setView('commands')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${view === 'commands'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/20'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+              >
+                <Terminal className="w-5 h-5" />
+                Commands
+              </button>
+              <button
+                onClick={() => setView('payloads')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${view === 'payloads'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/20'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+              >
+                <Zap className="w-5 h-5" />
+                Payloads
+              </button>
+              <button
+                onClick={() => setView('docs')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${view === 'docs'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-900/20'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+              >
+                <Book className="w-5 h-5" />
+                Docs
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-4">
@@ -46,62 +80,70 @@ function App() {
         </div>
       </header>
 
-      <nav className="bg-gray-800 border-b border-gray-700 sticky top-[140px] z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex gap-2 py-3 overflow-x-auto scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-gray-800">
-            <button
-              onClick={() => setActiveTab('all')}
-              className={`px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap transition-all ${
-                activeTab === 'all'
+      {view === 'commands' && (
+        <nav className="bg-gray-800 border-b border-gray-700 sticky top-[140px] z-40">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex gap-2 py-3 overflow-x-auto scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-gray-800">
+              <button
+                onClick={() => setActiveTab('all')}
+                className={`px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap transition-all ${activeTab === 'all'
                   ? 'bg-cyan-600 text-white'
                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-              }`}
-            >
-              All Tools
-            </button>
-            {toolCategories.map((category, index) => (
-              <button
-                key={index}
-                onClick={() => setActiveTab(index)}
-                className={`px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap transition-all ${
-                  activeTab === index
+                  }`}
+              >
+                All Tools
+              </button>
+              {toolCategories.map((category, index) => (
+                <button
+                  key={index}
+                  onClick={() => setActiveTab(index)}
+                  className={`px-4 py-2 rounded-lg font-medium text-sm whitespace-nowrap transition-all ${activeTab === index
                     ? 'bg-cyan-600 text-white'
                     : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                }`}
-              >
-                {category.name}
-              </button>
-            ))}
+                    }`}
+                >
+                  {category.name}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      </nav>
+        </nav>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {!target && (
-          <div className="mb-8 p-6 bg-yellow-900 bg-opacity-20 border border-yellow-700 rounded-lg">
-            <p className="text-yellow-400 text-sm">
-              <span className="font-semibold">Tip:</span> Enter a target domain or IP address above to see customized commands for your target.
-            </p>
-          </div>
-        )}
+        {view === 'commands' ? (
+          <>
+            {!target && (
+              <div className="mb-8 p-6 bg-yellow-900 bg-opacity-20 border border-yellow-700 rounded-lg">
+                <p className="text-yellow-400 text-sm">
+                  <span className="font-semibold">Tip:</span> Enter a target domain or IP address above to see customized commands for your target.
+                </p>
+              </div>
+            )}
 
-        {activeTab === 'all' ? (
-          toolCategories.map((category, index) => (
-            <CategorySection
-              key={index}
-              name={category.name}
-              icon={category.icon}
-              tools={category.tools}
-              target={target}
-            />
-          ))
+            {activeTab === 'all' ? (
+              toolCategories.map((category, index) => (
+                <CategorySection
+                  key={index}
+                  name={category.name}
+                  icon={category.icon}
+                  tools={category.tools}
+                  target={target}
+                />
+              ))
+            ) : (
+              <CategorySection
+                name={toolCategories[activeTab].name}
+                icon={toolCategories[activeTab].icon}
+                tools={toolCategories[activeTab].tools}
+                target={target}
+              />
+            )}
+          </>
+        ) : view === 'payloads' ? (
+          <PayloadGenerator target={target} />
         ) : (
-          <CategorySection
-            name={toolCategories[activeTab].name}
-            icon={toolCategories[activeTab].icon}
-            tools={toolCategories[activeTab].tools}
-            target={target}
-          />
+          <DocsViewer target={target} />
         )}
       </main>
 
