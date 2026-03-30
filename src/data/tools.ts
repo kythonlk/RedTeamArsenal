@@ -52,6 +52,55 @@ export const toolCategories = [
     ]
   },
   {
+    "name": "Remote Access & Lateral Movement",
+    "icon": "Monitor",
+    "tools": [
+      {
+        "name": "XFreeRDP",
+        "description": "Open-source RDP client for connecting to Windows systems",
+        "commands": [
+          "xfreerdp /u:{username} /p:{password} /v:{target_ip}",
+          "xfreerdp /u:{username} /p:{password} /v:{target_ip} /cert:ignore",
+          "xfreerdp /u:{username} /p:{password} /v:{target_ip} /dynamic-resolution",
+          "xfreerdp /u:{username} /pth:{ntlm_hash} /v:{target_ip}"
+        ]
+      },
+      {
+        "name": "Impacket",
+        "description": "Collection of Python tools for working with network protocols (SMB, MSRPC, etc.)",
+        "commands": [
+          "impacket-psexec {domain}/{user}:{password}@{target}",
+          "impacket-wmiexec {domain}/{user}:{password}@{target}",
+          "impacket-smbclient {domain}/{user}:{password}@{target}",
+          "impacket-secretsdump {domain}/{user}:{password}@{target}",
+          "impacket-atexec {domain}/{user}:{password}@{target}",
+          "impacket-dcomexec {domain}/{user}:{password}@{target}",
+          "impacket-getTGT {domain}/{user}:{password}",
+          "impacket-getST -spn {service}/{target} {domain}/{user}:{password}"
+        ]
+      },
+      {
+        "name": "CrackMapExec",
+        "description": "Post-exploitation tool for assessing and interacting with network services",
+        "commands": [
+          "crackmapexec smb {target} -u {user} -p {password}",
+          "crackmapexec smb {target} -u {user} -p {password} --shares",
+          "crackmapexec smb {target} -u {user} -p {password} --exec-method psexec -x 'whoami'",
+          "crackmapexec winrm {target} -u {user} -p {password}"
+        ]
+      },
+      {
+        "name": "Evil-WinRM",
+        "description": "WinRM shell for Windows remote management",
+        "commands": [
+          "evil-winrm -i {target_ip} -u {user} -p {password}",
+          "evil-winrm -i {target_ip} -u {user} -H {hash}",
+          "evil-winrm -i {target_ip} -u {user} -p {password} -s scripts/"
+        ]
+      }
+    ]
+  },
+  {
     name: "Port Scanning",
     icon: "Network",
     tools: [
