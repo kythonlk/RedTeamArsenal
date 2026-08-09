@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react';
 import { Search, FileText, ChevronRight, BookOpen, ExternalLink, X } from 'lucide-react';
 import { docsData, DocFile } from '../data/docsData';
+import MarkdownRenderer from './MarkdownRenderer';
 
 interface DocsViewerProps {
     target: string;
@@ -28,37 +29,6 @@ const DocsViewer = ({ target }: DocsViewerProps) => {
         });
         return cats;
     }, [filteredDocs]);
-
-    const renderContent = (content: string) => {
-        // Basic markdown-like rendering since we couldn't install react-markdown
-        // Supporting headers, lists, code blocks and target variable replacement
-        let rendered = content.replace(/{target}/g, target || '127.0.0.1');
-
-        return (
-            <div className="prose prose-invert max-w-none">
-                {rendered.split('\n').map((line, i) => {
-                    if (line.startsWith('# ')) return <h1 key={i} className="text-3xl font-bold text-white mb-4 mt-6">{line.substring(2)}</h1>;
-                    if (line.startsWith('## ')) return <h2 key={i} className="text-2xl font-bold text-cyan-400 mb-3 mt-5 border-b border-gray-700 pb-2">{line.substring(3)}</h2>;
-                    if (line.startsWith('### ')) return <h3 key={i} className="text-xl font-bold text-white mb-2 mt-4">{line.substring(4)}</h3>;
-                    if (line.startsWith('```')) return null; // Simple code block handling
-                    if (line.startsWith('- ')) return <li key={i} className="text-gray-300 ml-4 mb-1 list-disc">{line.substring(2)}</li>;
-                    if (line.trim() === '') return <br key={i} />;
-
-                    // Detect code blocks (crude way without full parser)
-                    const isCommand = line.startsWith('nmap') || line.startsWith('msfvenom') || line.startsWith('search');
-                    if (isCommand) {
-                        return (
-                            <div key={i} className="bg-black/50 p-3 rounded-lg border border-gray-800 my-2 font-mono text-cyan-300 text-sm overflow-x-auto">
-                                {line}
-                            </div>
-                        );
-                    }
-
-                    return <p key={i} className="text-gray-300 mb-2 leading-relaxed">{line}</p>;
-                })}
-            </div>
-        );
-    };
 
     return (
         <div className="flex flex-col h-[calc(100vh-250px)]">
@@ -122,7 +92,8 @@ const DocsViewer = ({ target }: DocsViewerProps) => {
                                 <BookOpen className="w-4 h-4" />
                                 {selectedDoc.category}
                             </div>
-                            {renderContent(selectedDoc.content)}
+                            <MarkdownRenderer content={selectedDoc.content} target={target} />
+
 
                             <div className="mt-12 pt-6 border-t border-gray-800 flex justify-between items-center text-sm text-gray-500">
                                 <span>Path: src/data/docs/{selectedDoc.path}</span>

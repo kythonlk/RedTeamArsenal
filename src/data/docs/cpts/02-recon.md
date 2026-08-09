@@ -1,109 +1,91 @@
-# CPTS 02: Reconnaissance Playbook
+# Reconnaissance
 
-## Quick Intro
-Passive reconnaissance gathers info without touching the target. Active probing triggers responses. CPTS requires you to chain these efficiently. Use `{target}` consistently.
+**Recon = building the target map before you knock.** Passive recon touches third parties, not the target; active recon probes the target directly. In a CPTS lab you usually jump straight to active recon of the given box, but know both. `{target}` = victim.
 
-## Attack Workflow
-
-1. **Passive Info Gathering**: DNS, Host, Social.
-2. **Active Port Scanning**: Identify open ports/services.
-3. **Service Enumeration**: Version/OS detection.
-4. **Web/App Fuzzing**: Directory and param testing.
-5. **Active Recon**: Verify live hosts.
+> Output discipline: save everything. `mkdir -p {target}/{scans,web,loot,creds}` and write every scan to a file. The exam report needs evidence and you'll re-reference these constantly.
 
 ---
 
-## Commands Section
+## Passive Recon (external / OSINT)
 
-### DNS & OSINT
 ```bash
-dig ANY {target}
-whois {target}
-theHarvester -d {target} -b mail -o -
-shodan q {target} | grep Port | head -50
-```nmap -v -p- {target}
-
-### Port Scanning
-```bash
-nmap -sC -sV -O -T4 -A {target}
-nmap --script vuln {target}
-
-# Specific Services
-curl -v http://{target}/admin | grep Server | tail -n 1
-```nmap -sV {target} --top-ports 1000
-
-### Directory Fuzzing
-```bash
-ffuf -w words.txt -u http://{target}/FFUFU {target}/FFUFU/FFU
-ffuf -U -w -U -u http://{target}/admin/{target}
-
-# Common paths
-ffuf -u http://{target}/ -w /etc/passwd
-```gobuster dir -u http://{target} -w words.txt
-gobuster dir -u http://{target} -u http://admin/
-
-### Service Scanning
-```bash
-curl -s -L http://{target}/admin/ -u admin:admin
-nc {target} -e /bin/sh
-
-# Netcat Interactive
-nc -e /bin/sh {target} 8080
-nc {target} -e /bin/bash -p 443
-```gobuster dir -u http://{target} -w wordlist.txt
+whois {domain}
+# DNS records without hammering the target
+dig {domain} A +short
+dig {domain} MX +short
+dig {domain} TXT +short
+dig {domain} NS +short
+# Emails, hosts, subdomains from public sources
+theHarvester -d {domain} -b crtsh,bing,duckduckgo
+# Certificate transparency = free subdomain list
+curl -s 'https://crt.sh/?q=%25.{domain}&output=json' | jq -r '.[].name_value' | sort -u
+# Historical URLs / endpoints
+waybackurls {domain} | sort -u | tee web/wayback.txt
+```
 
 ---
 
-## Tips & Shortcuts
+## Active Host Discovery
 
-*   **Speed**: Use `-A` flag with nmap for NSE scripts.
-*   **Port Speed**: Use `-T4` with `-T5` only if target is responsive.
-*   **Passive**: Use `theHarvester`, `Maltego`, `SpiderFoot`.
-*   **Active**: Use `ffuf` with `FFUFU` for path enumeration.
-*   **Port Scanning**: Use `-sV` for service version.
-*   **DNS**: Use `dig` for reverse lookup.
-*   **Web**: Use `curl -v` for headers.
+```bash
+# Which hosts are alive on the subnet?
+nmap -sn 10.10.10.0/24 -oN scans/hosts.txt
+fping -a -g 10.10.10.0/24 2>/dev/null
+# From a foothold, sweep the internal range
+for i in $(seq 1 254); do (ping -c1 -W1 172.16.5.$i >/dev/null && echo "172.16.5.$i up" &); done
+```
 
 ---
+
+## Active Port & Service Scanning
+
+```bash
+# Stage 1: all ports, fast
+nmap -p- --min-rate 10000 -T4 -Pn {target} -oN scans/allports.txt
+ports=$(grep open scans/allports.txt | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
+
+# Stage 2: deep scan on the open ports
+nmap -p$ports -sC -sV -O -Pn {target} -oA scans/deep
+
+# UDP top ports (SNMP/DNS/TFTP hide here)
+sudo nmap -sU --top-ports 100 -Pn {target} -oN scans/udp.txt
+```
+> Use `-Pn` on hosts that block ICMP (most Windows/AD boxes) or nmap will skip them. Full flag reference is in the **Enumeration** chapter.
+
+---
+
+## Web Reconnaissance
+
+```bash
+# Fingerprint the stack
+whatweb -a3 http://{target}
+curl -sI http://{target}
+# Content discovery
+feroxbuster -u http://{target} -x php,txt,html,bak --scan-limit 4
+gobuster dir -u http://{target} -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -x php,txt,html
+# Virtual host fuzzing (real app is often on a Host header)
+ffuf -u http://{target} -H 'Host: FUZZ.{domain}' -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -fs 0
+# Always check by hand:
+curl -s http://{target}/robots.txt
+curl -s http://{target}/sitemap.xml
+curl -s http://{target} | grep -iE '<!--|generator|version'
+```
+
+---
+
+## Recon Checklist
+
+- [ ] All-ports nmap saved; open ports fed into a deep `-sC -sV` scan
+- [ ] UDP top-100 scanned
+- [ ] Every service version noted → `searchsploit`
+- [ ] Web: whatweb, dir brute, vhost fuzz, robots.txt, HTML comments, JS files
+- [ ] Subdomains/vhosts discovered and added to `/etc/hosts`
+- [ ] Everything written to files under the target folder
 
 ## Common Mistakes
 
-*   **Skipping Passive**: Always check DNS first before scanning.
-*   **Bad Ports**: Don't scan all ports without reason.
-*   **Ignoring NSE**: Nmap Script Engine can find vulnerabilities.
-*   **No Output**: Always capture `nmap` results to files.
-*   **Target IP**: Don't forget to use `{target}` in all commands.
-
----
-
-## Mini Automation Scripts
-
-### Script 1: Basic Port Scan
-```bash
-#!/bin/bash
-for port in 80 443 8080 21 22 25; do
-    nmap -p $port {target}
-done
-```
-
-### Script 2: Fuzzy Directory
-```bash
-#!/bin/bash
-for dir in /admin /wp /phpmyadmin /cgi-bin; do
-    ffuf -u http://{target}${dir} -w wordlist.txt
-done
-```
-
-### Script 3: DNS Enumeration
-```bash
-#!/bin/bash
-dig {target}.any.any
-```nslookup {target}
-
-## Final Checklist
-
-1. Pass `nmap -sC -sV -A {target}`.
-2. Use `ffuf` for directories.
-3. Capture `DNS Records`.
-4. Check `HTTP Headers`.
-5. Save all outputs to `recon-{target}.txt`.
+- **Only scanning top 1000 ports.** Always `-p-` — services hide on high ports.
+- **Forgetting `-Pn`** on ping-filtered hosts → "host down" and nothing scanned.
+- **Skipping vhost fuzzing.** The vulnerable app is frequently a hidden virtual host.
+- **Not saving output.** You'll waste time re-scanning and have no evidence for the report.
+- **Ignoring UDP.** SNMP `public` and TFTP are easy wins people miss.

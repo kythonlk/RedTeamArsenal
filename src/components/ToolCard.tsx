@@ -14,7 +14,8 @@ export default function ToolCard({ name, description, commands, target }: ToolCa
   const replaceVariables = (command: string) => {
     return command
       .replace(/\{domain\}/g, target || 'target.com')
-      .replace(/\{ip\}/g, target || '192.168.1.1');
+      .replace(/\{target\}/g, target || '10.10.10.10')
+      .replace(/\{ip\}/g, target || '10.10.10.10');
   };
 
   const copyToClipboard = async (text: string, index: number) => {

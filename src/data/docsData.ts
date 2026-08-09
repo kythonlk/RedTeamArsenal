@@ -13,29 +13,35 @@ const rawDocs = import.meta.glob('./docs/**/*.md', {
 });
 
 export function getDocsData(): DocFile[] {
-  return Object.entries(rawDocs).map(([filePath, content]) => {
-    const pathParts = filePath.split('/');
-    const categoryRaw = pathParts[pathParts.length - 2];
-    const fileName = pathParts[pathParts.length - 1];
-    const id = fileName.replace(/\.md$/, '');
+  return Object.entries(rawDocs)
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+    .map(([filePath, content]) => {
+      const pathParts = filePath.split('/');
+      const categoryRaw = pathParts[pathParts.length - 2];
+      const fileName = pathParts[pathParts.length - 1];
+      const id = fileName.replace(/\.md$/, '');
 
-    // Transform "nmap-scanning" -> "Nmap Scanning"
-    const title = id
-      .split('-')
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
+      // Transform "03-web-attacks" -> "Web Attacks" (drop leading numeric prefix for display)
+      const title = id
+        .replace(/^\d+[-_]?/, '')
+        .split(/[-_]/)
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
 
-    // Transform "recon" -> "Recon"
-    const category = categoryRaw.charAt(0).toUpperCase() + categoryRaw.slice(1);
+      // Transform "recon" -> "Recon"; keep known acronyms uppercase
+      const category = categoryRaw
+        .split('-')
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
 
-    return {
-      id,
-      title,
-      category,
-      path: `${categoryRaw}/${fileName}`,
-      content: content as string,
-    };
-  });
+      return {
+        id,
+        title,
+        category,
+        path: `${categoryRaw}/${fileName}`,
+        content: content as string,
+      };
+    });
 }
 
 // Export a constant for easy use in your components

