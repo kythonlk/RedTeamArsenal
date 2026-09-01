@@ -15,7 +15,8 @@ export const toolCategories = [
         description: "Domain registration information",
         commands: [
           "whois {domain}",
-          "whois {ip}"
+          "whois {ip}",
+          "xfreerdp /v:{ip} /u:htb-student /p:HTB_@cademy_stdnt! /cert:ignore +clipboard +dynamic-resolution"
         ]
       },
       {
